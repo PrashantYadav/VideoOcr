@@ -57,7 +57,8 @@ import edu.sfsu.cs.orange.ocr.language.TranslateAsyncTask;
  * <p/>
  * The code for this class was adapted from the ZXing project: http://code.google.com/p/zxing/
  */
-public final class CaptureActivity extends Activity implements SurfaceHolder.Callback{
+public final class CaptureActivity extends Activity implements SurfaceHolder.Callback,
+        ShutterButton.OnShutterButtonListener {
 
     private static final String TAG = CaptureActivity.class.getSimpleName();
 
@@ -66,12 +67,12 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
     /**
      * ISO 639-3 language code indicating the default recognition language.
      */
-    public static final String DEFAULT_SOURCE_LANGUAGE_CODE = "eng";
+    public static String DEFAULT_SOURCE_LANGUAGE_CODE = "eng";
 
     /**
      * ISO 639-1 language code indicating the default target language for translation.
      */
-    public static final String DEFAULT_TARGET_LANGUAGE_CODE = "es";
+    public static String DEFAULT_TARGET_LANGUAGE_CODE = "es";
 
     /**
      * The default online machine translation service to use.
@@ -190,8 +191,10 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
     private ViewfinderView viewfinderView;
     private SurfaceView surfaceView;
     private SurfaceHolder surfaceHolder;
+    private TextView statusViewBottom;
     private TextView statusViewTop;
     private TextView ocrResultView;
+    private TextView translationView;
     private View cameraButtonView;
     private View resultView;
     private View progressView;
@@ -209,6 +212,7 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
     private int ocrEngineMode = TessBaseAPI.OEM_TESSERACT_ONLY;
     private String characterBlacklist;
     private String characterWhitelist;
+    private ShutterButton shutterButton;
     private boolean isTranslationActive; // Whether we want to show translations
     private boolean isContinuousModeActive; // Whether we are doing OCR in continuous mode
     private SharedPreferences prefs;
@@ -218,6 +222,9 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
     private boolean isEngineReady;
     private boolean isPaused;
     private static boolean isFirstLaunch; // True if this is the first time the app is being run
+    private TextView statusSourceLanguage;
+    private TextView statusTargetLanguage;
+
 
     Handler getHandler() {
         return handler;
@@ -238,6 +245,12 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
         checkFirstLaunch();
 
         if (isFirstLaunch) {
+            Intent intent = getIntent();
+            String s = intent.getStringExtra("code_source");
+            String t = intent.getStringExtra("code_target");
+            DEFAULT_SOURCE_LANGUAGE_CODE = s;
+            DEFAULT_TARGET_LANGUAGE_CODE = t;
+
             setDefaultPreferences();
         }
 
@@ -249,17 +262,30 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
         cameraButtonView = findViewById(R.id.camera_button_view);
         resultView = findViewById(R.id.result_view);
 
+        statusViewBottom = (TextView) findViewById(R.id.status_view_bottom);
+        registerForContextMenu(statusViewBottom);
         statusViewTop = (TextView) findViewById(R.id.status_view_top);
         registerForContextMenu(statusViewTop);
+        statusSourceLanguage = (TextView) findViewById(R.id.status_source_langauage);
+        statusTargetLanguage = (TextView) findViewById(R.id.status_target_language);
+
 
         handler = null;
         lastResult = null;
         hasSurface = false;
         beepManager = new BeepManager(this);
 
+        // Camera shutter button
+        if (DISPLAY_SHUTTER_BUTTON) {
+            shutterButton = (ShutterButton) findViewById(R.id.shutter_button);
+            shutterButton.setOnShutterButtonListener(this);
+            shutterButton.setVisibility(View.GONE);
+        }
 
         ocrResultView = (TextView) findViewById(R.id.ocr_result_text_view);
         registerForContextMenu(ocrResultView);
+        translationView = (TextView) findViewById(R.id.translation_text_view);
+        registerForContextMenu(translationView);
 
         progressView = (View) findViewById(R.id.indeterminate_progress_indicator_view);
 
@@ -415,7 +441,24 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
         }
     }
 
+    /**
+     * Called when the shutter button is pressed in continuous mode.
+     */
 
+    void onShutterButtonPressContinuous() {
+        Log.e("called", "onShutterButtonPressContinuous");
+        isPaused = true;
+        handler.stop();
+        beepManager.playBeepSoundAndVibrate();
+        if (lastResult != null) {
+            handleOcrDecode(lastResult);
+        } else {
+            Toast toast = Toast.makeText(this, "OCR failed. Please try again.", Toast.LENGTH_SHORT);
+            toast.setGravity(Gravity.TOP, 0, 0);
+            toast.show();
+            resumeContinuousDecoding();
+        }
+    }
 
     /**
      * Called to resume recognition after translation in continuous mode.
@@ -427,7 +470,10 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
         setStatusViewForContinuous();
         DecodeHandler.resetDecodeState();
         handler.resetState();
-
+        if (shutterButton != null && DISPLAY_SHUTTER_BUTTON) {
+            shutterButton.setVisibility(View.GONE);
+            //changed visiblilty
+        }
     }
 
     @Override
@@ -528,7 +574,11 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
                 return true;
             }
         } else if (keyCode == KeyEvent.KEYCODE_CAMERA) {
-
+            if (isContinuousModeActive) {
+                onShutterButtonPressContinuous();
+            } else {
+                handler.hardwareShutterButtonClick();
+            }
             return true;
         } else if (keyCode == KeyEvent.KEYCODE_FOCUS) {
             // Only perform autofocus if user is not holding down the button.
@@ -740,7 +790,11 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
         }
 
         // Turn off capture-related UI elements
+        shutterButton.setVisibility(View.GONE);
+        statusViewBottom.setVisibility(View.GONE);
         statusViewTop.setVisibility(View.GONE);
+        statusSourceLanguage.setVisibility(View.GONE);
+        statusTargetLanguage.setVisibility(View.GONE);
         cameraButtonView.setVisibility(View.GONE);
         viewfinderView.setVisibility(View.GONE);
         resultView.setVisibility(View.VISIBLE);
@@ -765,6 +819,7 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
 
         TextView translationLanguageLabelTextView = (TextView) findViewById(R.id.translation_language_label_text_view);
         TextView translationLanguageTextView = (TextView) findViewById(R.id.translation_language_text_view);
+        TextView translationTextView = (TextView) findViewById(R.id.translation_text_view);
 
         //if (isTranslationActive) {
         if (true) {
@@ -778,6 +833,7 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
 
             // Activate/re-activate the indeterminate progress indicator
             //changed visiblitiy
+            translationTextView.setVisibility(View.VISIBLE);
             progressView.setVisibility(View.VISIBLE);
             setProgressBarVisibility(true);
 
@@ -788,6 +844,7 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
             //changed visiblity for 3
             translationLanguageLabelTextView.setVisibility(View.VISIBLE);
             translationLanguageTextView.setVisibility(View.VISIBLE);
+            translationTextView.setVisibility(View.VISIBLE);
             progressView.setVisibility(View.GONE);
             setProgressBarVisibility(false);
         }
@@ -825,15 +882,22 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
             statusViewTop.setTextColor(Color.BLACK);
             statusViewTop.setBackgroundResource(R.color.status_top_text_background);
             statusViewTop.getBackground().setAlpha(meanConfidence * (255 / 100));
+            statusSourceLanguage.setText(sourceLanguageReadable);
+            statusTargetLanguage.setText(targetLanguageReadable);
+
         }
 
         if (CONTINUOUS_DISPLAY_METADATA) {
             // Display recognition-related metadata at the bottom of the screen
             long recognitionTimeRequired = ocrResult.getRecognitionTimeRequired();
+            statusViewBottom.setTextSize(14);
+            statusViewBottom.setText("OCR: " + sourceLanguageReadable + " - Mean confidence: " +
+                    meanConfidence.toString() + " - Time required: " + recognitionTimeRequired + " ms");
         }
 
         TextView translationLanguageLabelTextView = (TextView) findViewById(R.id.translation_language_label_text_view);
         TextView translationLanguageTextView = (TextView) findViewById(R.id.translation_language_text_view);
+        TextView translationTextView = (TextView) findViewById(R.id.translation_text_view);
 
         //if (isTranslationActive) {
         if (true) {
@@ -847,6 +911,7 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
 
             // Activate/re-activate the indeterminate progress indicator
             //changed visiblitiy
+            translationTextView.setVisibility(View.VISIBLE);
             progressView.setVisibility(View.VISIBLE);
             setProgressBarVisibility(true);
 
@@ -859,11 +924,32 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
             //changed visiblity for 3
             translationLanguageLabelTextView.setVisibility(View.VISIBLE);
             translationLanguageTextView.setVisibility(View.VISIBLE);
+            translationTextView.setVisibility(View.VISIBLE);
             progressView.setVisibility(View.GONE);
             setProgressBarVisibility(false);
         }
     }
 
+    /**
+     * Version of handleOcrContinuousDecode for failed OCR requests. Displays a failure message.
+     *
+     * @param obj Metadata for the failed OCR request.
+     */
+    void handleOcrContinuousDecode(OcrResultFailure obj) {
+        lastResult = null;
+        viewfinderView.removeResultText();
+
+        // Reset the text in the recognized text box.
+        statusViewTop.setText("");
+
+        if (CONTINUOUS_DISPLAY_METADATA) {
+            // Color text delimited by '-' as red.
+            statusViewBottom.setTextSize(14);
+            CharSequence cs = setSpanBetweenTokens("OCR: " + sourceLanguageReadable + " - OCR failed - Time required: "
+                    + obj.getTimeRequired() + " ms", "-", new ForegroundColorSpan(0xFFFF0000));
+            statusViewBottom.setText(cs);
+        }
+    }
 
     /**
      * Given either a Spannable String or a regular String and a token, apply
@@ -901,6 +987,9 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
         if (v.equals(ocrResultView)) {
             menu.add(Menu.NONE, OPTIONS_COPY_RECOGNIZED_TEXT_ID, Menu.NONE, "Copy recognized text");
             menu.add(Menu.NONE, OPTIONS_SHARE_RECOGNIZED_TEXT_ID, Menu.NONE, "Share recognized text");
+        } else if (v.equals(translationView)) {
+            menu.add(Menu.NONE, OPTIONS_COPY_TRANSLATED_TEXT_ID, Menu.NONE, "Copy translated text");
+            menu.add(Menu.NONE, OPTIONS_SHARE_TRANSLATED_TEXT_ID, Menu.NONE, "Share translated text");
         }
     }
 
@@ -923,7 +1012,20 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
                 shareRecognizedTextIntent.putExtra(android.content.Intent.EXTRA_TEXT, ocrResultView.getText());
                 startActivity(Intent.createChooser(shareRecognizedTextIntent, "Share via"));
                 return true;
-
+            case OPTIONS_COPY_TRANSLATED_TEXT_ID:
+                clipboardManager.setText(translationView.getText());
+                if (clipboardManager.hasText()) {
+                    Toast toast = Toast.makeText(this, "Text copied.", Toast.LENGTH_LONG);
+                    toast.setGravity(Gravity.BOTTOM, 0, 0);
+                    toast.show();
+                }
+                return true;
+            case OPTIONS_SHARE_TRANSLATED_TEXT_ID:
+                Intent shareTranslatedTextIntent = new Intent(android.content.Intent.ACTION_SEND);
+                shareTranslatedTextIntent.setType("text/plain");
+                shareTranslatedTextIntent.putExtra(android.content.Intent.EXTRA_TEXT, translationView.getText());
+                startActivity(Intent.createChooser(shareTranslatedTextIntent, "Share via"));
+                return true;
             default:
                 return super.onContextItemSelected(item);
         }
@@ -934,14 +1036,26 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
      */
     private void resetStatusView() {
         resultView.setVisibility(View.GONE);
-
+        if (CONTINUOUS_DISPLAY_METADATA) {
+            statusViewBottom.setText("");
+            statusViewBottom.setTextSize(14);
+            statusViewBottom.setTextColor(getResources().getColor(R.color.status_text));
+            //changed visiblity
+            statusViewBottom.setVisibility(View.GONE);
+        }
         if (CONTINUOUS_DISPLAY_RECOGNIZED_TEXT) {
             statusViewTop.setText("");
             statusViewTop.setTextSize(14);
             statusViewTop.setVisibility(View.VISIBLE);
+            statusSourceLanguage.setVisibility(View.VISIBLE);
+            statusTargetLanguage.setVisibility(View.VISIBLE);
         }
         viewfinderView.setVisibility(View.VISIBLE);
         cameraButtonView.setVisibility(View.VISIBLE);
+        if (DISPLAY_SHUTTER_BUTTON) {
+            shutterButton.setVisibility(View.GONE);
+            //changed visiblilty
+        }
         lastResult = null;
         viewfinderView.removeResultText();
     }
@@ -961,7 +1075,28 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
      */
     void setStatusViewForContinuous() {
         viewfinderView.removeResultText();
+        if (CONTINUOUS_DISPLAY_METADATA) {
+            statusViewBottom.setText("OCR: " + sourceLanguageReadable + " - waiting for OCR...");
+        }
+    }
 
+    @SuppressWarnings("unused")
+    void setButtonVisibility(boolean visible) {
+        if (shutterButton != null && visible == true && DISPLAY_SHUTTER_BUTTON) {
+            shutterButton.setVisibility(View.GONE);
+            //changed visiblitliy
+        } else if (shutterButton != null) {
+            shutterButton.setVisibility(View.GONE);
+        }
+    }
+
+    /**
+     * Enables/disables the shutter button to prevent double-clicks on the button.
+     *
+     * @param clickable True if the button should accept a click
+     */
+    void setShutterButtonClickable(boolean clickable) {
+        shutterButton.setClickable(clickable);
     }
 
     /**
@@ -971,7 +1106,27 @@ public final class CaptureActivity extends Activity implements SurfaceHolder.Cal
         viewfinderView.drawViewfinder();
     }
 
+    @Override
+    public void onShutterButtonClick(ShutterButton b) {
+        if (isContinuousModeActive) {
+            onShutterButtonPressContinuous();
+        } else {
+            if (handler != null) {
+                handler.shutterButtonClick();
+            }
+        }
+    }
 
+    @Override
+    public void onShutterButtonFocus(ShutterButton b, boolean pressed) {
+        requestDelayedAutoFocus();
+    }
+
+    /**
+     * Requests autofocus after a 350 ms delay. This delay prevents requesting focus when the user
+     * just wants to click the shutter button without focusing. Quick button press/release will
+     * trigger onShutterButtonClick() before the focus kicks in.
+     */
     private void requestDelayedAutoFocus() {
         // Wait 350 ms before focusing to avoid interfering with quick button presses when
         // the user just wants to take a picture without focusing.
